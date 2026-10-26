@@ -1,38 +1,38 @@
 ---
 name: cos-retouch-pipeline
-description: 用户说「你好cos」或要求修COS照片/后期/换场景/加特效/超分8K时启用。八步管线：识图报认定→定改法→定参数→2K批量出图→用户挑选→幸存者8K超分。真人coser专用，本机Qwen-Image-2.1执行。
-version: 2.0.0
+description: 用户说「你好cos」或要求修COS照片/后期/换场景/加特效时启用。七步管线：识图报认定→定改法→定参数→2K批量出图→挑选交付。真人coser专用，本机Qwen-Image-2.1执行，交付止步2K，不做超分。
+version: 2.1.0
 author: Hermes Agent
 license: MIT
 platforms: [windows]
 metadata:
   hermes:
-    tags: [cosplay, retouch, comfyui, qwen-image, image-editing, upscale, batch]
+    tags: [cosplay, retouch, comfyui, qwen-image, image-editing, batch]
     related_skills: [comfyui-retouch-workflow, qwen21-reference-prompt, image-warp-fields]
 ---
 
-# COS 修图管线（八步）
+# COS 修图管线（七步）
 
 ## Overview
 
-真人 coser 写真后期流水线：输入图片路径 → 输出 2K 编辑版 + 用户挑选后的 8K 超分版。全程本机 ComfyUI（Qwen-Image-2.1），走 API 提交，不碰用户活画布。
+真人 coser 写真后期流水线：输入图片路径 → 输出 2K 编辑版。全程本机 ComfyUI（Qwen-Image-2.1），走 API 提交，不碰用户活画布。
 
-设计核心是**两阶段交付**：先批量出 2K 让用户真实眼见挑选，只对幸存者跑 8K 超分。超分是最贵的一步（8K tiled ≈10-15min/张），绝不能给注定被删的废片烧显卡。
+**不做超分**（2026-10-26 用户拍板砍掉 8K 阶段）：交付止步 2K 编辑版，用户在输出夹自由挑选删除。任何情况下不得擅自加超分/放大步骤；外部超分模型（4x-UltraSharp/RealESRGAN）放真人脸必形变，永远别用。
 
 ## When to Use
 
-- **用户说启动词「你好cos」** → 立即进入八步管线，从第 2 步问图片路径开始（这是本技能的正式入口）
-- 用户给图片路径或文件夹 + COS 后期意图（修图 / 换场景 / 加特效 / 超分 / 出图）
-- 用户说「这张怎么修」「帮我后期」「背景换成 X」「超到 8K」
+- **用户说启动词「你好cos」** → 立即进入七步管线，从第 2 步问图片路径开始（这是本技能的正式入口）
+- 用户给图片路径或文件夹 + COS 后期意图（修图 / 换场景 / 加特效 / 出图）
+- 用户说「这张怎么修」「帮我后期」「背景换成 X」
 - 真人 coser 实拍照（漫展 / 摄影棚 / 外景）
 
 **Don't use for**：无原图的纯文生图、国漫/插画创作、非真人照片、纯提示词写作不执行。
 
 ---
 
-## 八步管线
+## 七步管线
 
-每步都有完成标准，达标才进下一步。用户拍板制：第 7 步是强制停点。
+每步都有完成标准，达标才进下一步。
 
 ### 第 1 步 · 启用
 
@@ -91,7 +91,7 @@ metadata:
 2. **特效档位**：轻 / 中 / 强。默认「中」；说「三档都要」= 出三版（只改特效句，其余段逐字相同）。
 3. **输出夹**：默认同图夹。
 
-单张/批量第 2 步已判，超分倍率固定 8K，都不再问。
+单张/批量第 2 步已判，都不再问。
 
 **完成标准**：模型 / 档位 / 输出夹三项确定。
 
@@ -106,36 +106,14 @@ metadata:
 
 **完成标准**：全部图落盘，报告成功/失败清单 + 文件路径。
 
-### 第 7 步 · 用户挑选（强制停点）
+### 第 7 步 · 交付
 
-交付时固定说这句：
-
-> 编辑版全在 `<输出夹>`，挑完删掉不要的，说「超分」我就对剩下的跑 8K。
-
-- **停在这里等用户拍板**，绝不自动进第 8 步。
-- **幸存者判定 = 输出夹里仍存在的编辑版文件**。被删的自动出局，不需要任何状态文件。
+- 全部落盘后报告清单：成功 / 失败 / 跳过 + 文件路径。固定说：「编辑版全在 `<输出夹>`，不要的自己删。」
+- 交付前逐张视觉自查：五官漂移必须报告并建议重跑；皮肤瓷感默认保留（用户偏好）。
 - 用户点名要重跑某张 → 回第 4/6 步单独重跑，不重跑整批。
+- **不做任何超分/放大**（已砍，见 Overview）。
 
-**完成标准**：用户说「超分」，或明确点名要处理的文件。
-
-### 第 8 步 · 超分 8K
-
-用现成工作流 **`D:\AI\ComfyUI_windows_portable\工作流\放大2_Ray版.json`**（Qwen2.1 tiled 分块重绘，8G 显存唯一能上 8K 的姿势）。
-
-| 参数 | 值 |
-|---|---|
-| 扩散模型 | `rayQwen21_turboV13Int8convrot.safetensors` |
-| LoRA | `qwen-image-2.1-restore` 1.0 + viggle-turbo 1.0 |
-| TiledUpscale | **megapixels=45**（≈8K）、tile_megapixels=2、overlap=128、multiple=32、max_growth=8 |
-| 采样 | 8 步、cfg=1、euler/simple |
-| 拼接 | TiledUpscaleStitch keep_colors=1（保原色） |
-
-- 幸存者全部上传 → 全部入队 → 串行跑到完 → 落盘 `原名_cos后期_序号_8K.png`。
-- **禁止外部超分模型**（4x-UltraSharp / RealESRGAN 放大人脸必形变）。
-- API 节点图（UI json 转 API 的完整结构）见 `references/upscale-8k.md`。
-- 耗时基准：8K tiled ≈ **10-15 分钟/张**。
-
-**完成标准**：幸存者全部落盘 8K，报告清单（成功/失败/跳过）。
+**完成标准**：清单已交付、自查已做、用户已知晓文件位置。
 
 ---
 
@@ -188,24 +166,21 @@ metadata:
 | 修脸/头发/修容措辞（**唯一权威源**） | `references/portrait.md` |
 | 场景替换铁律 + 8 场景库 | `references/scenes.md` |
 | Qwen2.1 规范 + 黑图根因 + 节点接法 | `references/qwen21.md` |
-| 8K tiled 超分 API 节点图 | `references/upscale-8k.md` |
 | 用户偏好（跨夹记忆，读写规则见下） | `references/preferences.md` |
 | 字段结构示例（非措辞来源） | `references/template.json` |
-| 两阶段批量脚本 | `scripts/cos_batch.py` |
+| 批量执行脚本（单阶段 edit） | `scripts/cos_batch.py` |
 
 **偏好文件读写**：第 2 步读 `references/preferences.md`（UTF-8 BOM + CRLF），记过的偏好直接当默认值并在询问时告知「按你的历史偏好默认了 XX」，与用户本次明说冲突时以本次为准。交付后把用户**明说**的口味追加进去，格式 `- YYYY-MM-DD 类别：内容`。用 Python `io.open(..., encoding="utf-8-sig", newline="")` 追加，**勿用 patch 工具**（对 BOM 文件必败）。只记口味，不记任务进度。
 
 ## Common Pitfalls
 
-1. **超分用整图重跑** → 8K 必爆显存/被中断（实测 `execution_interrupted`）。必须用 tiled 分块工作流。
-2. **外部超分模型放脸** → 4x-UltraSharp/ESRGAN 让人脸形变损坏。只用 Qwen 重绘。
-3. **漏 `import shutil`** → 批量第 1 张后脚本崩（实测）。照 `scripts/cos_batch.py` 的 import 头写。
-4. **`patch_on_device` 当字符串传** → 它是 BOOLEAN（true=补丁驻 GPU）。防黑图真正靠 `dequant_dtype=float32` + `patch_dtype=float16` 两参数。
-5. **批量并发提交** → 8G 显存 OOM。必须串行（入队由 ComfyUI 队列串行，别开多进程）。
-6. **识图只做一次** → 第二张盲改，姿势/道具/瑕疵全错。夹级复用 ≠ 跳过逐张识图。
-7. **修瑕疵自创措辞** → 与 portrait.md 打架。逐字引用。
-8. **自动接超分** → 废片也烧 10-15 分钟。第 7 步必须停住等用户删图。
-9. **瓷感过度重跑** → 用户偏好保留，只重跑五官漂移的。
+1. **擅自加超分/放大** → 已砍（2026-10-26 用户拍板），交付止步 2K。外部超分模型（4x-UltraSharp/RealESRGAN）放真人脸必形变，永远别用。
+2. **漏 `import shutil`** → 批量第 1 张后脚本崩（实测）。照 `scripts/cos_batch.py` 的 import 头写。
+3. **`patch_on_device` 当字符串传** → 它是 BOOLEAN（true=补丁驻 GPU）。防黑图真正靠 `dequant_dtype=float32` + `patch_dtype=float16` 两参数。
+4. **批量并发提交** → 8G 显存 OOM。必须串行（入队由 ComfyUI 队列串行，别开多进程）。
+5. **识图只做一次** → 第二张盲改，姿势/道具/瑕疵全错。夹级复用 ≠ 跳过逐张识图。
+6. **修瑕疵自创措辞** → 与 portrait.md 打架。逐字引用。
+7. **瓷感过度重跑** → 用户偏好保留，只重跑五官漂移的。
 
 ## Verification Checklist
 
@@ -213,7 +188,6 @@ metadata:
 - [ ] 输入质量预检做过（AI 痕迹/低分辨率如实告知）
 - [ ] 提示词五段齐全；修瑕疵措辞逐字引自 portrait.md
 - [ ] 出图前提示词已过目；批量总耗时已报
-- [ ] 第 7 步停住等拍板，没自动跑超分
-- [ ] 超分走 tiled 工作流、megapixels=45，未用外部超分模型
-- [ ] 落盘文件逐个核对存在（编辑版 / 8K 版）
+- [ ] 全程没加超分/放大步骤（交付止步 2K）
+- [ ] 落盘文件逐个核对存在（2K 编辑版）
 - [ ] 用户明说的偏好已追加进 preferences.md

@@ -1,26 +1,35 @@
 # -*- coding: utf-8 -*-
 """
-COS 修图两阶段批量脚本（Qwen-Image-2.1）
-==========================================
-阶段一 edit    ：全夹图 → 逐张 2K 编辑 → 全部入队 → 串行跑完 → 落盘
-阶段二 upscale ：幸存编辑版 → tiled 8K 超分 → 全部入队 → 串行跑完 → 落盘
+COS 修图批量脚本（Qwen-Image-2.1 · 2K 编辑 · 单阶段）
+======================================================
+全夹图 → 逐张 2K 编辑 → 全部入队 → ComfyUI 队列串行跑完 → 落盘 + 清单
 
 用法（用 ComfyUI 自带 python 跑）：
   D:/AI/ComfyUI_windows_portable/python_embeded/python.exe cos_batch.py edit
-  D:/AI/ComfyUI_windows_portable/python_embeded/python.exe cos_batch.py upscale
 
-设计要点：
-  · 全部入队 = 连续 POST /prompt，ComfyUI 队列自己串行跑，中间零间隔；
-    脚本崩了队列照跑，重启后对账补缺（已有成图的跳过）
-  · 幸存者判定 = 输出夹里仍存在的 *_cos后期_*.png（用户删掉的自动出局）
-  · 单张失败跳过记清单，不中断整批
+v2.1.0（2026-10-26）：超分阶段已按用户拍板移除——不做 8K，交付止步 2K。
+旧 tiled 8K 工作流文档见 git 历史（references/upscale-8k.md）。
+
+实机验证事实（改参数前先读，都是踩过的坑）：
+  - UnetLoaderGGUFAdvanced 三参数：dequant_dtype=float32 + patch_dtype=float16
+    防黑图（Q8 GGUF 反量化 NaN）；patch_on_device 是 BOOLEAN（True=补丁驻 GPU），
+    历史成功出图均为 True。字符串"cpu"会被服务端 coerce 成 True——但别再传字符串。
+  - TextEncodeQwenImage21 图连法（API 形状）：inputs 里 key 写
+    "images.image_1": ["LoadImage节点号", 0]，vae 必须连（节点出 latent 直连 KSampler.latent_image）
+  - cfg=1.0：负词无效，一切约束写进正向；euler/simple；编辑 40 步 denoise=1.0；resolution=2048
+  - 8G 显存串行：全部入队后 ComfyUI 自己逐个跑，别开多进程并发提交
+  - 断点续跑：已有成图（OUTDIR 里同名文件）自动跳过；脚本崩了重启重跑即可
+  - 2026-10-25 踩坑：漏 import shutil，批量第 1 张后崩（已写死在文件头）
+
+耗时基准（RTX 4060Ti 8G 实测）：2K/40 步 ≈ 19 分钟/张（满载；
+后台占显存软件如剪映/抖音会拖慢 5 倍，渲染前能关则关）
 """
-import json, os, sys, time, shutil, urllib.request
+import json, time, shutil, os, sys, urllib.request
 
 SERVER = "http://127.0.0.1:8188"
 COMFY = "D:/AI/ComfyUI_windows_portable/ComfyUI/"
 OUTDIR = r"C:\Users\user\Desktop\罗莱短剧\coser测试"      # ← 输出夹（默认=图所在夹）
-JOBS_FILE = r"C:\Users\user\.hermes\workspace\cos_jobs.json"  # ← 阶段一任务清单
+JOBS_FILE = r"C:\Users\user\.hermes\workspace\cos_jobs.json"  # ← 任务清单
 SEED = 20261025
 
 # ───────────────────────── HTTP ─────────────────────────
@@ -45,7 +54,7 @@ def upload(path, remote_name):
 
 # ───────────────────────── 工作流 ─────────────────────────
 def wf_edit(prompt, image_name, prefix, seed=SEED, resolution=2048, steps=40, denoise=1.0):
-    """阶段一：2K 图生图编辑（GGUF Q8 模型，三参数防黑图）"""
+    """2K 图生图编辑（GGUF Q8 模型，三参数防黑图）"""
     return {
         "1": {"class_type": "UnetLoaderGGUFAdvanced", "inputs": {
             "unet_name": "qwen-image-2.1-UC-Q8_0.gguf",
@@ -64,47 +73,6 @@ def wf_edit(prompt, image_name, prefix, seed=SEED, resolution=2048, steps=40, de
             "positive": ["5", 0], "negative": ["5", 1], "latent_image": ["5", 2]}},
         "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["3", 0]}},
         "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0], "filename_prefix": prefix}},
-    }
-
-RESTORE_PROMPT = ("Restore the photo: remove blur, noise and compression artifacts and "
-                  "recover sharp, natural detail, keeping the same composition, people and colors.")
-
-def wf_upscale_8k(image_name, prefix, seed=SEED, megapixels=45.0):
-    """阶段二：tiled 8K 超分（Ray 版工作流 API 化）"""
-    return {
-        "1": {"class_type": "UNETLoader", "inputs": {
-            "unet_name": "qwen\\rayQwen21_turboV13Int8convrot.safetensors",
-            "weight_dtype": "default"}},
-        "2": {"class_type": "CLIPLoader", "inputs": {
-            "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
-            "type": "qwen_image", "device": "default"}},
-        "3": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_2.1_vae_bf16.safetensors"}},
-        "4": {"class_type": "AUSBOSS_NODES_LoraLoader", "inputs": {
-            "model": ["1", 0], "clip": ["2", 0],
-            "loras": json.dumps([
-                {"name": "qwen-image-2.1-restore.safetensors", "strength": 1.0,
-                 "enabled": True, "triggers": ""},
-                {"name": "Qwen-Image-2.1-viggle-turbo-v0.3-6step-lora-r128.safetensors",
-                 "strength": 1.0, "enabled": True, "triggers": ""}], ensure_ascii=False),
-            "trigger_separator": ", ", "on_missing": "error"}},
-        "5": {"class_type": "LoadImage", "inputs": {"image": image_name, "upload": "image"}},
-        "6": {"class_type": "AUSBOSS_NODES_TiledUpscale", "inputs": {
-            "image": ["5", 0], "megapixels": megapixels, "tile_megapixels": 2.0,
-            "overlap": 128, "multiple": 32, "max_growth": 8}},
-        "7": {"class_type": "TextEncodeQwenImage21", "inputs": {
-            "clip": ["4", 1], "prompt": RESTORE_PROMPT, "negative_prompt": "",
-            "resolution": 0,                     # 0 = 每块保持自身尺寸，切勿设 2048
-            "vae": ["3", 0], "images.image_1": ["6", 2]}},   # 6.2 = before
-        "8": {"class_type": "QwenImage21Cache", "inputs": {
-            "model": ["4", 0], "device": "auto", "dtype": "default"}},
-        "9": {"class_type": "KSampler", "inputs": {
-            "model": ["8", 0], "seed": seed, "steps": 8, "cfg": 1.0,
-            "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
-            "positive": ["7", 0], "negative": ["7", 1], "latent_image": ["7", 2]}},
-        "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["3", 0]}},
-        "11": {"class_type": "AUSBOSS_NODES_TiledUpscaleStitch", "inputs": {
-            "tiles": ["10", 0], "stitcher": ["6", 1], "keep_colors": 1.0}},
-        "12": {"class_type": "SaveImage", "inputs": {"images": ["11", 0], "filename_prefix": prefix}},
     }
 
 # ───────────────────────── 队列 ─────────────────────────
@@ -149,10 +117,10 @@ def out_path(pid):
             return COMFY + (sub + "/" if sub else "output/") + im["filename"]
     return None
 
-# ───────────────────────── 阶段一 ─────────────────────────
+# ───────────────────────── 编辑（唯一阶段）─────────────────────────
 def stage_edit():
     jobs = json.load(open(JOBS_FILE, encoding="utf-8"))
-    print("=== 阶段一：2K 编辑，共 " + str(len(jobs)) + " 张 ===", flush=True)
+    print("=== 2K 编辑，共 " + str(len(jobs)) + " 张 ===", flush=True)
     pids, tags, meta = [], [], []
     for j in jobs:
         name = j["out_name"]
@@ -174,44 +142,14 @@ def stage_edit():
         if src:
             shutil.copy(src, target); ok += 1
             print("  落盘: " + target, flush=True)
-    print("=== 阶段一完成：成功 " + str(ok) + " / 失败 " + str(len(failed)) + " ===", flush=True)
-    print("下一步：请用户在输出夹挑选，删掉不要的，然后跑 upscale", flush=True)
-
-# ───────────────────────── 阶段二 ─────────────────────────
-def stage_upscale():
-    files = [f for f in os.listdir(OUTDIR)
-             if f.endswith(".png") and "_cos后期_" in f and "_8K" not in f]
-    print("=== 阶段二：8K 超分，幸存 " + str(len(files)) + " 张 ===", flush=True)
-    if not files:
-        print("没有幸存文件", flush=True); return
-    pids, tags, meta = [], [], []
-    for f in files:
-        base = f[:-4]
-        target = os.path.join(OUTDIR, base + "_8K.png")
-        if os.path.exists(target):
-            print("  - [" + base + "] 已有 8K，跳过", flush=True)
-            continue
-        remote = upload(os.path.join(OUTDIR, f), "up_in_" + base + ".png")
-        wf = wf_upscale_8k(remote, base + "_8K")
-        pids.append(submit(wf, base)); tags.append(base); meta.append((base, target))
-    if not pids:
-        print("没有待处理任务", flush=True); return
-    done, failed = wait_all(pids, tags, timeout_min=300)
-    ok = 0
-    for pid in done:
-        base = done[pid]
-        target = dict(meta)[base]
-        src = out_path(pid)
-        if src:
-            shutil.copy(src, target); ok += 1
-            print("  落盘: " + target, flush=True)
-    print("=== 阶段二完成：成功 " + str(ok) + " / 失败 " + str(len(failed)) + " ===", flush=True)
+    print("=== 编辑完成：成功 " + str(ok) + " / 失败 " + str(len(failed)) + " ===", flush=True)
+    print("交付：编辑版全在输出夹，不要的自己删（无超分阶段）", flush=True)
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     if mode == "edit":
         stage_edit()
     elif mode == "upscale":
-        stage_upscale()
+        print("超分已移除（2026-10-26 用户拍板）：交付止步 2K，无此阶段", flush=True)
     else:
-        print("用法: cos_batch.py edit | upscale", flush=True)
+        print("用法: cos_batch.py edit", flush=True)
