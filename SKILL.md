@@ -168,6 +168,11 @@ metadata:
 | Qwen2.1 规范 + 黑图根因 + 节点接法 | `references/qwen21.md` |
 | 用户偏好（跨夹记忆，读写规则见下） | `references/preferences.md` |
 | 字段结构示例（非措辞来源） | `references/template.json` |
+| 换背景选型规则（云缨单实录，出图验收前先核产出） | `references/background-replacement.md` |
+| 背景替换+强档特效实录模板（云缨单，验收满意） | `references/bg-swap-strong-fx.md` |
+| 桌面软件抢显存实测（剪映 5 倍降速判读法） | `references/desktop-vram-contention.md` |
+| 实测成片验收记录（公孙离/BlueLolita/蕾姆/云缨） | `references/output-acceptance-cases.md` |
+| 识图判读与背景选型实证（用户当场纠正实录） | `references/vision-id-and-background-selection.md` |
 | 批量执行脚本（单阶段 edit） | `scripts/cos_batch.py` |
 
 **偏好文件读写**：第 2 步读 `references/preferences.md`（UTF-8 BOM + CRLF），记过的偏好直接当默认值并在询问时告知「按你的历史偏好默认了 XX」，与用户本次明说冲突时以本次为准。交付后把用户**明说**的口味追加进去，格式 `- YYYY-MM-DD 类别：内容`。用 Python `io.open(..., encoding="utf-8-sig", newline="")` 追加，**勿用 patch 工具**（对 BOM 文件必败）。只记口味，不记任务进度。
