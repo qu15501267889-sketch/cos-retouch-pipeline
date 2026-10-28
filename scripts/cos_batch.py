@@ -1,33 +1,36 @@
 # -*- coding: utf-8 -*-
 """
-COS 修图批量脚本（Qwen-Image-2.1 · 2K 编辑 · 单阶段 · 每张卸载显存）
-=====================================================================
+COS 修图批量脚本（Qwen-Image-2.1 · 2K 编辑 · 单阶段 · 每张卸载显存 · 默认 turbo）
+==============================================================================
 逐张 2K 编辑，每张之间卸载模型+清显存碎片（防 offload 死锁），串行。
 
 用法（用 ComfyUI 自带 python 跑）：
   D:/AI/ComfyUI_windows_portable/python_embeded/python.exe cos_batch.py edit
+  D:/AI/ComfyUI_windows_portable/python_embeded/python.exe cos_batch.py free   # 手动清一次显存
 
-v2.2.0（2026-10-26）：新增「每张之间释放显存」——每张完成后调 ComfyUI
-  `POST /free {"unload_models": true, "free_memory": true}`（服务端
-  unload_all_models() + GC），下张重新加载。目的：防长时间运行显存碎片化
-  导致的 offload 死锁（功耗掉到 50-65W / 0 步 / 日志 "N MB offloaded"）。
-  代价：每张多花 ~1-2 分钟重新加载模型，但对比死锁一卡 19 分钟是净赚。
+v2.3.1（2026-10-27）：**默认恢复 Q8_0**（40 步）——v2.3.0 曾擅自把默认切成 turbo，
+  用户纠正「我啥时候让你切换了」，已回滚；turbo 仅在用户点名时 per-job 写
+  "model": "turbo" 启用（`rayQwen21_turboV13Int8convrot`，UNETLoader，16 步 ≈7 分钟/张）。
+  实测依据（妲己同提示词同 seed 866176）：turbo 8步=3.7min 细节丢太多；
+  16步≈7min 结构清晰但皮肤塑料感/毛发毛刺/特效贴纸感仍在（蒸馏上限，加步数治不了）；
+  Q8 40步≈19min 细节最全，仍为默认主力。
 
-v2.1.0（2026-10-26）：超分阶段已按用户拍板移除——不做 8K，交付止步 2K。
-旧 tiled 8K 工作流文档见 git 历史（references/upscale-8k.md）。
+v2.2.0（2026-10-26）：每张之间 POST /free 卸载模型+清碎片（防 offload 死锁）。
+v2.1.0（2026-10-26）：超分阶段已移除——不做 8K，交付止步 2K。
 
 实机验证事实（改参数前先读，都是踩过的坑）：
-  - UnetLoaderGGUFAdvanced 三参数：dequant_dtype=float32 + patch_dtype=float16
-    防黑图（Q8 GGUF 反量化 NaN）；patch_on_device 是 BOOLEAN（True=补丁驻 GPU），
-    历史成功出图均为 True。字符串"cpu"会被服务端 coerce 成 True——但别再传字符串。
+  - turbo 模型用普通 `UNETLoader`（safetensors），unet_name 带 `qwen\` 前缀；
+    **不是** UnetLoaderGGUFAdvanced——GGUF 三参数（float32/f16/true）只适用 Q8 档
+  - Q8 GGUF 三参数：dequant_dtype=float32 + patch_dtype=float16 防黑图（Q8 反量化 NaN）；
+    patch_on_device 是 BOOLEAN（True=补丁驻 GPU），别传字符串
   - TextEncodeQwenImage21 图连法（API 形状）：inputs 里 key 写
     "images.image_1": ["LoadImage节点号", 0]，vae 必须连（节点出 latent 直连 KSampler.latent_image）
-  - cfg=1.0：负词无效，一切约束写进正向；euler/simple；编辑 40 步 denoise=1.0；resolution=2048
-  - 8G 显存串行：逐张提交，绝不并发（别开多进程）
+  - cfg=1.0：负词无效，一切约束写进正向；euler/simple；denoise=1.0；resolution=2048
+  - 8G 显存串行：逐张提交，绝不并发；每张后 /free（下张重载 ~1-2 分钟，对比死锁净赚）
   - 断点续跑：已有成图（OUTDIR 里同名文件）自动跳过；脚本崩了重启重跑即可
   - 2026-10-25 踩坑：漏 import shutil，批量第 1 张后崩（已写死在文件头）
 
-耗时基准（RTX 4060Ti 8G 实测）：2K/40 步 ≈ 19 分钟/张（满载；
+耗时基准（RTX 4060Ti 8G 实测）：turbo 16步 ≈7 分钟/张；Q8 40步 ≈19 分钟/张（干净显存满载；
 后台占显存软件如剪映/抖音会拖慢 5 倍，渲染前能关则关）
 """
 import json, time, shutil, os, sys, urllib.request
@@ -69,13 +72,23 @@ def free_vram():
         print("  ⚠ 释放显存失败（不阻断）: " + repr(e)[:120], flush=True)
 
 # ───────────────────────── 工作流 ─────────────────────────
-def wf_edit(prompt, image_name, prefix, seed=SEED, resolution=2048, steps=40, denoise=1.0):
-    """2K 图生图编辑（GGUF Q8 模型，三参数防黑图）"""
-    return {
-        "1": {"class_type": "UnetLoaderGGUFAdvanced", "inputs": {
+def wf_edit(prompt, image_name, prefix, seed=SEED, resolution=2048, denoise=1.0,
+            model="q8", steps=None):
+    """2K 图生图编辑。model='turbo'（默认，16步≈7分）或 'q8'（质量档，40步≈19分）。
+    turbo 走 UNETLoader（safetensors），Q8 走 UnetLoaderGGUFAdvanced（三参数防黑图）。"""
+    if model == "q8":
+        node1 = {"class_type": "UnetLoaderGGUFAdvanced", "inputs": {
             "unet_name": "qwen-image-2.1-UC-Q8_0.gguf",
             "dequant_dtype": "float32", "patch_dtype": "float16",
-            "patch_on_device": True}},                    # BOOLEAN！不是字符串 "cpu"
+            "patch_on_device": True}}                    # BOOLEAN！不是字符串 "cpu"
+        steps = steps if steps else 40
+    else:  # turbo 默认
+        node1 = {"class_type": "UNETLoader", "inputs": {
+            "unet_name": "qwen\\rayQwen21_turboV13Int8convrot.safetensors",
+            "weight_dtype": "default"}}
+        steps = steps if steps else 16
+    return {
+        "1": node1,
         "2": {"class_type": "CLIPLoader", "inputs": {
             "clip_name": "qwen3vl_8b_int8_convrot.safetensors", "type": "qwen_image"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_2.1_vae_bf16.safetensors"}},
@@ -140,9 +153,14 @@ def stage_edit():
             print("  - [" + name + "] 已存在，跳过", flush=True)
             skip += 1
             continue
-        print("  [" + str(i + 1) + "/" + str(len(jobs)) + "] " + name, flush=True)
+        model = j.get("model", "q8")
+        steps = j.get("steps") or (40 if model == "q8" else 16)
+        tag_model = "q8质量档" if model == "q8" else "turbo"
+        print("  [" + str(i + 1) + "/" + str(len(jobs)) + "] " + name
+              + " | " + tag_model + " " + str(steps) + "步", flush=True)
         remote = upload(j["input"], "cos_in_" + name + ".png")
-        wf = wf_edit(j["prompt"], remote, name, seed=j.get("seed", SEED))
+        wf = wf_edit(j["prompt"], remote, name, seed=j.get("seed", SEED),
+                     model=model, steps=j.get("steps"))
         pid = submit(wf, name)
         good, status = wait_one(pid, name)
         if good:
@@ -155,6 +173,14 @@ def stage_edit():
                 fail += 1; failed_list.append(name + "(成图缺失)")
         else:
             fail += 1; failed_list.append(name + "(" + status + ")")
+            # 2026-10-28 大乔单实测：copy失败也从output兜底捞一次
+            src = out_path(pid)
+            if src:
+                try:
+                    shutil.copy(src, target); print("  落盘(兜底): " + target, flush=True)
+                    fail -= 1; failed_list.pop(); ok += 1
+                except Exception as e:
+                    print("  兜底拷贝失败: " + repr(e)[:120], flush=True)
         # 每张之后卸载模型+清碎片（最后一张也卸，保持干净）
         free_vram()
     print("=== 编辑完成：成功 " + str(ok) + " / 失败 " + str(fail) + " / 跳过 " + str(skip) + " ===", flush=True)

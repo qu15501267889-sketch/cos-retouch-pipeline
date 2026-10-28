@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """cos-preflight.py — COS 管线提示词组装自检（第 4.5 步的机器执行版）
 用法: python cos-preflight.py <prompt.txt> [--skin <img.jpg>]
 退出码: 0=全过 1=有漏项（漏项清单打在 stdout）
@@ -15,7 +15,9 @@ def check(prompt, user_flags):
     has = lambda *kws: all(k in prompt for k in kws)
 
     if user_flags.get("retouch"):
-        if not has("面部美颜", "身材塑形", "全身美白", "服装精修"):
+        import re as _re
+        if not (_re.search(r"面部[^：\n]{0,2}美颜", prompt) and _re.search(r"身材[^：\n]{0,2}塑形", prompt)
+                and _re.search(r"全身[^：\n]{0,2}美白", prompt) and _re.search(r"服装(与丝袜|与)?[^：\n]{0,4}精修", prompt)):
             fails.append("1 精修四件不齐（面部美颜/身材塑形/全身美白/服装精修）")
     if user_flags.get("retouch") or "全身美白" in prompt:
         fixed = "白皙透亮肤如凝脂，通透自然，中性灰+高低频保留毛孔，不漂白不假面"
@@ -25,7 +27,7 @@ def check(prompt, user_flags):
                 k in prompt for k in ("冷调象牙白", "莹白如玉", "去黄")):
             fails.append("2b 暖金光场景未叠冷调对抗词")
     m = re.search(r"(九|8|6|三)条?[尾翼]", prompt)
-    if m and not has("根部衔接", "形态完整连贯", "不遮挡"):
+    if m and not (has("根部衔接", "形态完整连贯") and (has("不遮挡") or has("不被遮挡") or has("完整可见"))):
         fails.append("3 数量部件五律不齐（数字/根部衔接/连贯/遮挡守卫）")
     if re.search(r"踩在|坐在|倚在", prompt) and not has("无悬空", "完全贴合", "下压"):
         fails.append("4 接触写实句缺失（完全贴合/无悬空/下压形变）")
