@@ -37,7 +37,7 @@ import json, time, shutil, os, sys, urllib.request
 
 SERVER = "http://127.0.0.1:8188"
 COMFY = "D:/AI/ComfyUI_windows_portable/ComfyUI/"
-OUTDIR = r"C:\Users\user\Desktop\罗莱短剧\coser测试"      # ← 输出夹（默认=图所在夹）
+OUTDIR = r"C:\Users\user\Desktop\罗莱短剧\coser测试3"      # ← 输出夹（默认=图所在夹）
 JOBS_FILE = r"C:\Users\user\.hermes\workspace\cos_jobs.json"  # ← 任务清单
 SEED = 20261025
 
@@ -76,6 +76,7 @@ def wf_edit(prompt, image_name, prefix, seed=SEED, resolution=2048, denoise=1.0,
             model="q8", steps=None):
     """2K 图生图编辑。model='turbo'（默认，16步≈7分）或 'q8'（质量档，40步≈19分）。
     turbo 走 UNETLoader（safetensors），Q8 走 UnetLoaderGGUFAdvanced（三参数防黑图）。"""
+    lora_chain = None
     if model == "q8":
         node1 = {"class_type": "UnetLoaderGGUFAdvanced", "inputs": {
             "unet_name": "qwen-image-2.1-UC-Q8_0.gguf",
@@ -87,7 +88,8 @@ def wf_edit(prompt, image_name, prefix, seed=SEED, resolution=2048, denoise=1.0,
             "unet_name": "qwen\\rayQwen21_turboV13Int8convrot.safetensors",
             "weight_dtype": "default"}}
         steps = steps if steps else 16
-    return {
+    ks_model = ["lora", 0] if lora_chain else ["1", 0]
+    wf = {
         "1": node1,
         "2": {"class_type": "CLIPLoader", "inputs": {
             "clip_name": "qwen3vl_8b_int8_convrot.safetensors", "type": "qwen_image"}},
@@ -97,12 +99,15 @@ def wf_edit(prompt, image_name, prefix, seed=SEED, resolution=2048, denoise=1.0,
             "clip": ["2", 0], "prompt": prompt, "negative_prompt": "",
             "resolution": resolution, "vae": ["3", 0], "images.image_1": ["4", 0]}},
         "6": {"class_type": "KSampler", "inputs": {
-            "model": ["1", 0], "seed": seed, "steps": steps, "cfg": 1.0,
+            "model": ks_model, "seed": seed, "steps": steps, "cfg": 1.0,
             "sampler_name": "euler", "scheduler": "simple", "denoise": denoise,
             "positive": ["5", 0], "negative": ["5", 1], "latent_image": ["5", 2]}},
         "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["3", 0]}},
         "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0], "filename_prefix": prefix}},
     }
+    if lora_chain:
+        wf["lora"] = lora_chain["lora"]
+    return wf
 
 # ───────────────────────── 队列 ─────────────────────────
 def submit(wf, tag):

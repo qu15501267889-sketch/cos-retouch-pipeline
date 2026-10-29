@@ -20,4 +20,7 @@ jobs.json 形状：
 [{"input": "绝对路径.png", "prompt": "五段提示词全文",
   "out_name": "落盘名(无扩展)", "seed": 20261026, "resolution": 4096}]
 落盘：<OUTDIR>/<out_name>.png
+
+> ⚠ OUTDIR 是脚本顶部硬编码常量，**每单换图片夹必须先 patch 脚本改 OUTDIR**，
+> 否则会落盘到上一单的夹子（2026-10-29 王昭君单→嫦娥单踩坑）。
 """
